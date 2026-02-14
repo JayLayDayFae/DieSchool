@@ -1,0 +1,318 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<title> </title>
+<style>
+    body { margin: 0; overflow: hidden; background: #000; font-family: 'Courier New', Courier, monospace; }
+    canvas { display: block; }
+    
+    @keyframes pulse {
+        0% { opacity: 0.3; }
+        50% { opacity: 1; }
+        100% { opacity: 0.3; }
+    }
+
+    #splash {
+        position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+        background: black; z-index: 200; display: flex; 
+        justify-content: center; align-items: center; color: white;
+        cursor: pointer; font-size: 1.5em; letter-spacing: 2px;
+        animation: pulse 2s infinite;
+    }
+
+    #loader {
+        position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+        background: black; z-index: 100; display: none; 
+        justify-content: center; align-items: center;
+        transition: opacity 2s ease-in-out;
+        pointer-events: none;
+    }
+    #loader img { max-width: 100%; max-height: 100%; object-fit: contain; }
+
+    #overlay { 
+        position: absolute; top: 0; left: 0; width: 100%; height: 100%; 
+        background: black; display: none; flex-direction: column; 
+        justify-content: center; align-items: center; color: white; z-index: 210;
+        text-align: center;
+    }
+    #stats { line-height: 1.6; font-size: 1.2em; margin-bottom: 20px; }
+    
+    #closeBtn {
+        background: white; color: black; border: none;
+        padding: 10px 25px; font-family: 'Courier New', monospace;
+        font-weight: bold; font-size: 1.1em; cursor: pointer;
+        transition: background 0.3s;
+    }
+    #closeBtn:hover { background: #ccc; }
+</style>
+</head>
+<body>
+
+<div id="splash">PRESS TO INITIALIZE</div>
+
+<div id="loader">
+    <img src="https://files.catbox.moe/iy3t2s.png" alt="Cover">
+</div>
+
+<div id="overlay">
+    <h1 id="endTitle">YOU WERE CAPTURED.</h1>
+    <div id="stats"></div>
+    <button id="closeBtn" onclick="window.close()">I'm satisfied</button>
+</div>
+<canvas id="game"></canvas>
+
+<script>
+const canvas = document.getElementById("game");
+const ctx = canvas.getContext("2d");
+const colCanvas = document.createElement('canvas');
+const colCtx = colCanvas.getContext('2d', { willReadFrequently: true });
+
+canvas.width = window.innerWidth;
+canvas.height = window.innerHeight;
+
+const sfxIntro = new Audio("https://files.catbox.moe/swbf85.mp3");
+const sfxShot = new Audio("https://files.catbox.moe/apqf0x.mp3");
+const sfxReload = new Audio("https://files.catbox.moe/hda2sy.mp3");
+const sfxSiren = new Audio("https://files.catbox.moe/iasmlu.mp3");
+const sfxEndTheme = new Audio("https://files.catbox.moe/sjvjh5.mp3");
+sfxEndTheme.loop = true;
+
+const mapImg = new Image();
+mapImg.src = "https://images.steamusercontent.com/ugc/932688289954964762/373B717017DAAF4182FF21A136026A92BCD7AD3B/";
+const collisionImg = new Image();
+collisionImg.crossOrigin = "anonymous"; 
+collisionImg.src = "https://files.catbox.moe/ziymo5.png";
+
+let player = { x: 0, y: 0, radius: 10.2, speed: 2.4, angle: 0 };
+let enemies = [], splatters = [], keys = {};
+let mousePos = { x: 0, y: 0 };
+let ammo = 20, maxAmmo = 20, reloading = false, reloadProgress = 0, reloadTime = 90;
+let recoil = 0, fireFlash = 0, screenShake = 0, collisionData = null, zoom = 2.5;
+
+let timeLeft = 90, kills = 0, bulletsFired = 0, timeSpent = 0, gameOver = false, flipped = false;
+let gameStarted = false;
+
+document.getElementById("splash").addEventListener("click", () => {
+    document.getElementById("splash").style.display = "none";
+    document.getElementById("loader").style.display = "flex";
+    sfxIntro.play();
+
+    setTimeout(() => {
+        let fadeAudio = setInterval(() => {
+            if (sfxIntro.volume > 0.05) sfxIntro.volume -= 0.05;
+            else { sfxIntro.pause(); clearInterval(fadeAudio); }
+        }, 100);
+    }, 18000);
+
+    setTimeout(() => {
+        const loader = document.getElementById("loader");
+        loader.style.opacity = "0";
+        gameStarted = true; 
+        setTimeout(() => {
+            loader.style.display = "none";
+        }, 2000);
+    }, 20000);
+});
+
+window.addEventListener("keydown", e => {
+    keys[e.key.toLowerCase()] = true;
+    if (e.key === "2") flipped = !flipped;
+});
+window.addEventListener("keyup", e => keys[e.key.toLowerCase()] = false);
+window.addEventListener("mousemove", e => { mousePos.x = e.clientX; mousePos.y = e.clientY; });
+
+window.addEventListener("mousedown", () => {
+    if (!gameStarted || gameOver) return;
+    bulletsFired++;
+    if (flipped) {
+        sfxShot.play();
+        endGame("SELF-TERMINATED");
+        return;
+    }
+    if (ammo > 0 && !reloading) {
+        ammo--; recoil = -10; fireFlash = 4; screenShake = 8;
+        sfxShot.cloneNode(true).play();
+        const dirX = Math.cos(player.angle), dirY = Math.sin(player.angle);
+        enemies.forEach(en => {
+            if (en.frozen) return;
+            const dx = en.x - player.x, dy = en.y - player.y;
+            const dist = Math.hypot(dx, dy);
+            const angleToEn = Math.atan2(dy, dx);
+            let diff = Math.abs(player.angle - angleToEn);
+            if (diff > Math.PI) diff = Math.PI * 2 - diff;
+            if (diff < 0.15 && dist < 600) { 
+                let blocked = false;
+                for (let step = 0; step < dist; step += 4) {
+                    if (isWallAt(player.x + dirX * step, player.y + dirY * step)) { blocked = true; break; }
+                }
+                if (!blocked) {
+                    en.health--; 
+                    if (en.health <= 0) { en.frozen = true; en.vx = 0; en.vy = 0; kills++; }
+                    for (let i = 0; i < 15; i++) {
+                        splatters.push({x: en.x + (Math.random()-0.5)*15, y: en.y + (Math.random()-0.5)*15, size: Math.random()*3+1, alpha: 0.8});
+                    }
+                }
+            }
+        });
+    }
+});
+
+function isWallAt(x, y) {
+    if (!collisionData) return false;
+    const ix = Math.floor(x), iy = Math.floor(y);
+    if (ix < 0 || iy < 0 || ix >= canvas.width || iy >= canvas.height) return true;
+    const idx = (iy * canvas.width + ix) * 4;
+    return (collisionData[idx] > 180 && collisionData[idx + 1] > 180); 
+}
+
+function moveWithCollision(obj, dx, dy) {
+    if (!isWallAt(obj.x + dx, obj.y)) obj.x += dx;
+    if (!isWallAt(obj.x, obj.y + dy)) obj.y += dy;
+}
+
+function endGame(reason) {
+    if (gameOver) return;
+    gameOver = true;
+    
+    // Play end theme when stats show
+    sfxEndTheme.play();
+
+    if (reason === "YOU WERE CAPTURED.") sfxSiren.play();
+    document.getElementById("overlay").style.display = "flex";
+    document.getElementById("endTitle").innerText = reason;
+    document.getElementById("stats").innerHTML = `
+        Kills: ${kills}<br>
+        Bullets Fired: ${bulletsFired}<br>
+        Time Spent: ${timeSpent.toFixed(1)}s
+    `;
+}
+
+function update() {
+    if (!gameStarted || gameOver) return;
+    timeSpent += 1/60;
+    let dx = 0, dy = 0;
+    if (keys["w"]) dy -= player.speed; if (keys["s"]) dy += player.speed;
+    if (keys["a"]) dx -= player.speed; if (keys["d"]) dx += player.speed;
+    if (dx !== 0 && dy !== 0) { const factor = 0.707; dx *= factor; dy *= factor; }
+    moveWithCollision(player, dx, dy);
+    player.angle = Math.atan2(mousePos.y - canvas.height / 2, mousePos.x - canvas.width / 2);
+
+    enemies.forEach(en => {
+        if (en.frozen) return;
+        if (isWallAt(en.x + en.vx, en.y)) en.vx *= -1;
+        if (isWallAt(en.x, en.y + en.vy)) en.vy *= -1;
+        en.x += en.vx; en.y += en.vy;
+    });
+
+    if (recoil < 0) recoil += 1.0;
+    if (fireFlash > 0) fireFlash--;
+    if (screenShake > 0) screenShake *= 0.8;
+    if (ammo === 0 && keys["r"] && !reloading) { reloading = true; sfxReload.play(); }
+    if (reloading && ++reloadProgress >= reloadTime) { ammo = maxAmmo; reloadProgress = 0; reloading = false; }
+
+    timeLeft -= 1/60;
+    if (timeLeft <= 0) endGame("YOU WERE CAPTURED.");
+}
+
+function draw() {
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    const sX = (Math.random() - 0.5) * screenShake, sY = (Math.random() - 0.5) * screenShake;
+
+    if (gameStarted) {
+        ctx.save();
+        ctx.translate(canvas.width / 2 + sX, canvas.height / 2 + sY);
+        ctx.scale(zoom, zoom);
+        ctx.translate(-player.x, -player.y);
+        ctx.drawImage(mapImg, 0, 0, canvas.width, canvas.height);
+        
+        splatters.forEach(s => { 
+            ctx.fillStyle = `rgba(160, 0, 0, ${s.alpha})`;
+            ctx.beginPath(); ctx.arc(s.x, s.y, s.size, 0, Math.PI*2); ctx.fill(); 
+        });
+        
+        enemies.forEach(en => {
+            ctx.beginPath(); ctx.arc(en.x, en.y, en.radius, 0, Math.PI*2);
+            ctx.fillStyle = en.frozen ? "#1a1a1a" : "#7a7a7a"; ctx.fill();
+            ctx.strokeStyle = "black"; ctx.lineWidth = 0.5; ctx.stroke();
+        });
+
+        ctx.save();
+        ctx.translate(player.x, player.y);
+        ctx.rotate(flipped ? player.angle + Math.PI : player.angle);
+        ctx.beginPath(); ctx.arc(0, 0, player.radius, 0, Math.PI*2);
+        ctx.fillStyle = "#b5b5b5"; ctx.fill(); ctx.lineWidth = 0.8; ctx.strokeStyle = "black"; ctx.stroke();
+        
+        const lineL = 31.3, baseT = 4.4, off = recoil;
+        ctx.lineWidth = baseT; ctx.strokeStyle = "black";
+        ctx.beginPath(); ctx.moveTo(player.radius + off, 0); ctx.lineTo(player.radius + lineL - 5 + off, 0); ctx.stroke();
+        ctx.lineWidth = baseT * 0.6;
+        ctx.beginPath(); ctx.moveTo(player.radius + lineL - 5 + off, 0); ctx.lineTo(player.radius + lineL + off, 0); ctx.stroke();
+        ctx.lineWidth = 0.5; ctx.fillStyle = "#b5b5b5";
+        ctx.beginPath(); ctx.arc(player.radius + lineL * 0.2 + off, baseT * 0.9, 3.5, 0, Math.PI*2); ctx.fill(); ctx.stroke();
+        ctx.beginPath(); ctx.arc(player.radius + lineL * 0.6 + off, -baseT * 0.9, 3.5, 0, Math.PI*2); ctx.fill(); ctx.stroke();
+
+        if (fireFlash > 0 && !flipped) {
+            ctx.beginPath(); ctx.moveTo(player.radius + lineL + off, 0);
+            ctx.lineTo(player.radius + lineL + 12 + off, -6);
+            ctx.lineTo(player.radius + lineL + 20 + off, 0);
+            ctx.lineTo(player.radius + lineL + 12 + off, 6);
+            ctx.closePath(); ctx.fillStyle = "orange"; ctx.fill();
+        }
+        ctx.restore();
+        ctx.restore();
+
+        if (fireFlash > 0 && !flipped) {
+            ctx.fillStyle = `rgba(255, 255, 0, ${fireFlash * 0.15})`;
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+        }
+
+        if (timeLeft < 5 && timeLeft > 0) {
+            let opacity = (5 - timeLeft) / 5;
+            let grd = ctx.createLinearGradient(0, 0, canvas.width, 0);
+            grd.addColorStop(0, `rgba(255, 0, 0, ${opacity * 0.4})`);
+            grd.addColorStop(1, `rgba(0, 0, 255, ${opacity * 0.4})`);
+            ctx.fillStyle = grd;
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+        }
+
+        ctx.fillStyle = "white"; ctx.font = "bold 18px Arial";
+        ctx.fillText("PRESS 2 TO END IT", 30, canvas.height - 90);
+        ctx.fillText("AMMO: " + ammo, 30, canvas.height - 30);
+        ctx.fillText("TIME LEFT: " + Math.max(0, Math.ceil(timeLeft)), canvas.width - 160, 40);
+        
+        let redVal = Math.min(255, kills * 10);
+        ctx.fillStyle = `rgb(${redVal}, ${255 - redVal}, ${255 - redVal})`;
+        ctx.fillText("KILLS: " + kills, 30, 40);
+        
+        if (reloading) {
+            ctx.fillStyle = "white";
+            ctx.fillText("RELOADING...", 30, canvas.height - 60);
+        }
+    }
+    requestAnimationFrame(function loop() { update(); draw(); });
+}
+
+function init() {
+    colCanvas.width = canvas.width; colCanvas.height = canvas.height;
+    colCtx.drawImage(collisionImg, 0, 0, canvas.width, canvas.height);
+    collisionData = colCtx.getImageData(0, 0, colCanvas.width, colCanvas.height).data;
+    for (let i = 0; i < collisionData.length; i += 4) {
+        if (collisionData[i] > 200 && collisionData[i+1] < 50) {
+            player.x = (i/4)%canvas.width; player.y = Math.floor((i/4)/canvas.width);
+            break;
+        }
+    }
+    for (let i = 0; i < 30; i++) {
+        let rx, ry;
+        do { rx = Math.random()*canvas.width; ry = Math.random()*canvas.height; } while (isWallAt(rx, ry));
+        enemies.push({x: rx, y: ry, radius: 7.4, vx: (Math.random()-0.5)*1.2, vy: (Math.random()-0.5)*1.2, frozen: false, health: 2});
+    }
+}
+
+mapImg.onload = () => collisionImg.onload = init;
+draw();
+</script>
+</body>
+</html>
